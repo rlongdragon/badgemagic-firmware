@@ -5,6 +5,17 @@
 
 #include "xbm.h"
 
+// Double Buffering function with synchronization
+// Request a buffer swap; swap will occur at next frame boundary
+void fb_swap(void);
+
+// ISR-safe buffer swap used at frame boundary
+void fb_swap_isr(void);
+
+// Mark update region for fb_write to avoid swap during writes
+void fb_begin_update(void);
+void fb_end_update(void);
+
 int ani_xbm_next_frame(xbm_t *xbm, uint16_t *fb, int col, int row);
 int ani_xbm_scroll_up(xbm_t *xbm, int vh, uint16_t *fb, int col, int row);
 int ani_xbm_scrollup_pad( xbm_t *xbm, int vh, int pt, int pb,

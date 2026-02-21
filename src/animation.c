@@ -1,9 +1,21 @@
 #include <stdlib.h>
 
+#include "CH58x_common.h"
+
 #include "xbm.h"
 #include "leddrv.h"
 #include "bmlist.h"
 #include "debug.h"
+
+// External pointers for double buffering (defined in main.c)
+extern volatile uint16_t fb_front[LED_COLS];
+extern volatile uint16_t fb_back[LED_COLS];
+extern volatile uint16_t *fb_write;
+extern volatile uint16_t *fb_display;
+extern volatile uint8_t led_frame_complete;
+extern volatile uint8_t fb_swap_pending;
+
+static volatile uint8_t fb_write_busy;
 
 #define ANI_ANIMATION_STEPS     (5) // steps
 #define ANI_FIXED_STEPS         (LED_COLS) // steps
@@ -14,6 +26,44 @@
 
 // Shift left on positive and right on negative n
 #define SIGNED_SHIFT(reg, n) ((n) >= 0) ? (reg) >> (n) : (reg) << abs(n)
+
+static inline void fb_swap_buffers(void)
+{
+	volatile uint16_t *temp;
+	temp = fb_display;
+	fb_display = fb_write;
+	fb_write = temp;
+}
+
+// Double Buffering: Request a buffer swap at the next frame boundary
+// Swap is always performed in the ISR at frame completion
+void fb_swap(void)
+{
+	fb_swap_pending = 1;
+}
+
+// ISR-safe swap at frame boundary (no waiting, no IRQ control)
+void fb_swap_isr(void)
+{
+	if (!fb_swap_pending)
+		return;
+	if (fb_write_busy)
+		return;
+
+	fb_swap_pending = 0;
+	led_frame_complete = 0;
+	fb_swap_buffers();
+}
+
+void fb_begin_update(void)
+{
+	fb_write_busy = 1;
+}
+
+void fb_end_update(void)
+{
+	fb_write_busy = 0;
+}
 
 int mod(int a, int b)
 {

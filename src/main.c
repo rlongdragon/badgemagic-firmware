@@ -86,7 +86,16 @@ static uint32_t sw_centiseconds = 0;
 
 static tmosTaskID common_taskid = INVALID_TASK_ID ;
 
-volatile uint16_t fb[LED_COLS] = {0};
+// Double Buffering: front buffer for LED display, back buffer for animation
+volatile uint16_t fb_front[LED_COLS] = {0};
+volatile uint16_t fb_back[LED_COLS] = {0};
+volatile uint16_t *fb_write = fb_back;    // Animation writes to back buffer
+volatile uint16_t *fb_display = fb_front; // LED interrupt reads from front buffer
+
+// Synchronization: track LED scan completion
+volatile uint8_t led_frame_complete = 1;  // Set when one complete frame is displayed
+volatile uint8_t fb_swap_pending = 0;     // Flag indicating swap is waiting
+
 volatile int mode, is_play_sequentially = 1;
 static int clock_active = 0;
 
@@ -122,7 +131,13 @@ static void bm_transition()
 }
 void play_splash(xbm_t *xbm, int col, int row, int spT)
 {
-	while (ani_xbm_scrollup_pad(xbm, 11, 11, 11, fb, 0, 0) != 0) {
+	while (1) {
+		fb_begin_update();
+		int more = ani_xbm_scrollup_pad(xbm, 11, 11, 11, (uint16_t *)fb_write, 0, 0);
+		fb_end_update();
+		if (more == 0)
+			break;
+		fb_swap();
 		DelayMs(spT);
 	}
 }
@@ -175,18 +190,23 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
 		};
 
 		bm_t *bm = bmlist_current();
+		fb_begin_update();
 		if (animations[LEGACY_GET_ANIMATION(bm->modes)])
-			if (animations[LEGACY_GET_ANIMATION(bm->modes)](bm, fb) == 0
+			if (animations[LEGACY_GET_ANIMATION(bm->modes)](bm, (uint16_t *)fb_write) == 0
 				&& is_play_sequentially) {
 				bm->anim_step = 0;
 				bmlist_gonext();
 			}
 		if (bm->is_flash) {
-			ani_flash(bm, fb, flash_step);
+			ani_flash(bm, (uint16_t *)fb_write, flash_step);
 		}
 		if (bm->is_marquee) {
-			ani_marque(bm, fb, marque_step);
+			ani_marque(bm, (uint16_t *)fb_write, marque_step);
 		}
+		fb_end_update();
+
+		// Swap buffers after animation update is complete
+		fb_swap();
 
 		uint32_t t = ANI_SPEED_STRATEGY(LEGACY_GET_SPEED(bm->modes));
 		tmos_start_task(common_taskid, ANI_NEXT_STEP, t / 625);
@@ -198,7 +218,9 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
 		bm_t *bm = bmlist_current();
 		marque_step++;
 		if (bm->is_marquee) {
-			ani_marque(bm, fb, marque_step);
+			fb_begin_update();
+			ani_marque(bm, (uint16_t *)fb_write, marque_step);
+			fb_end_update();
 		}
 
 		return events ^ ANI_MARQUE;
@@ -219,17 +241,25 @@ static uint16_t common_tasks(tmosTaskID task_id, uint16_t events)
 		flash_step++;
 
 		if (bm->is_flash) {
-			ani_flash(bm, fb, flash_step);
+			fb_begin_update();
+			ani_flash(bm, (uint16_t *)fb_write, flash_step);
+			fb_end_update();
 		}
 		if (bm->is_marquee) {
-			ani_marque(bm, fb, marque_step);
+			fb_begin_update();
+			ani_marque(bm, (uint16_t *)fb_write, marque_step);
+			fb_end_update();
 		}
 
 		return events ^ ANI_FLASH;
 	}
 
 	if (events & BLE_NEXT_STEP) {
-		ani_xbm_next_frame(&bluetooth, fb, 10, 0);
+		fb_begin_update();
+		ani_xbm_next_frame(&bluetooth, (uint16_t *)fb_write, 10, 0);
+		fb_end_update();
+		// Swap buffers after BLE animation update
+		fb_swap();
 
 		return events ^ BLE_NEXT_STEP;
 	}
@@ -287,7 +317,10 @@ static void start_ble_animation()
 	tmos_stop_task(common_taskid, ANI_NEXT_STEP);
 	tmos_stop_task(common_taskid, ANI_MARQUE);
 	tmos_stop_task(common_taskid, ANI_FLASH);
-	memset(fb, 0, sizeof(fb));
+	PFIC_DisableIRQ(TMR0_IRQn);
+	memset((void *)fb_front, 0, LED_COLS * sizeof(uint16_t));
+	memset((void *)fb_back, 0, LED_COLS * sizeof(uint16_t));
+	PFIC_EnableIRQ(TMR0_IRQn);
 
 	tmos_start_reload_task(common_taskid, BLE_NEXT_STEP, 500000 / 625);
 }
@@ -315,7 +348,10 @@ static void stop_all_animation()
 	tmos_stop_task(common_taskid, ANI_MARQUE);
 	tmos_stop_task(common_taskid, ANI_FLASH);
 	tmos_stop_task(common_taskid, BLE_NEXT_STEP);
-	memset(fb, 0, sizeof(fb));
+	PFIC_DisableIRQ(TMR0_IRQn);
+	memset((void *)fb_front, 0, LED_COLS * sizeof(uint16_t));
+	memset((void *)fb_back, 0, LED_COLS * sizeof(uint16_t));
+	PFIC_EnableIRQ(TMR0_IRQn);
 }
 
 int streaming_enabled;
@@ -338,7 +374,9 @@ uint8_t stream_bitmap(uint8_t *params, uint16_t len)
 		return -1;
 	}
 
-	tmos_memcpy(fb, params, min(LED_COLS * 2, len));
+	fb_begin_update();
+	tmos_memcpy((void *)fb_write, params, min(LED_COLS * 2, len));
+	fb_end_update();
 	return 0;
 }
 
@@ -354,14 +392,14 @@ static void debug_init()
 static void disp_bat_stt(int bat_percent, int col, int row)
 {
 	if (bat_percent < 0) {
-		xbm2fb(&batwarn_xbm, fb, col, row);
+		xbm2fb(&batwarn_xbm, (uint16_t *)fb_write, col, row);
 		return;
 	}
 
-	xbm2fb(&bat_xbm, fb, col, row);
+	xbm2fb(&bat_xbm, (uint16_t *)fb_write, col, row);
 	bat_percent /= 10;
 	for (int i=1; i <= bat_percent; i++) {
-		fb[col + i] = fb[col];
+		fb_write[col + i] = fb_write[col];
 	}
 }
 
@@ -369,7 +407,7 @@ static void fb_putchar(char c, int col, int row)
 {
 	for (int i=0; i < 6; i++) {
 		if (col + i >= LED_COLS) break;
-		fb[col + i] = (fb[col + i] & ~(0x7f << row))
+		fb_write[col + i] = (fb_write[col + i] & ~(0x7f << row))
 				| (font5x7[c - ' '][i] << row);
 	}
 }
@@ -774,15 +812,21 @@ static void disp_charging()
 		int percent = batt_raw2percent(batt_raw());
 
 		if (charging_status()) {
+			fb_begin_update();
 			disp_bat_stt(blink ? percent : 0, 2, 2);
-			if (ani_xbm_next_frame(&fabm_xbm, fb, 16, 0) == 0) {
+			if (ani_xbm_next_frame(&fabm_xbm, (uint16_t *)fb_write, 16, 0) == 0) {
 				fb_puts(VERSION_ABBR, sizeof(VERSION_ABBR), 16, 2);
 				fb_putchar(' ', 40, 2);
 			}
+			fb_end_update();
+			fb_swap();
 			blink = !blink;
 			DelayMs(500);
 		} else {
+			fb_begin_update();
 			disp_bat_stt(percent, 7, 2);
+			fb_end_update();
+			fb_swap();
 			DelayMs(500);
 			return;
 		}
@@ -845,7 +889,7 @@ int main()
 	usb_start();
 
 	led_init();
-	TMR0_TimerInit((FREQ_SYS / 2000) / 2);
+	TMR0_TimerInit((FREQ_SYS / 3000) / 2);
 	TMR0_ITCfg(ENABLE, TMR0_3_IT_CYC_END);
 	PFIC_EnableIRQ(TMR0_IRQn);
 
@@ -906,9 +950,15 @@ void TMR0_IRQHandler(void)
 		state = i&3;
 
 		if (state == 0) {
-			if ((i >> 1) >= LED_COLS)
+			if ((i >> 1) >= LED_COLS) {
 				i = 0;
-			led_write2dcol(i >> 2, fb[i >> 1], fb[(i >> 1) + 1]);
+				// One complete frame has been scanned
+				led_frame_complete = 1;
+				// If a swap is pending, perform it now
+				fb_swap_isr();
+			}
+			// Read from front buffer (fb_display) for LED output
+			led_write2dcol(i >> 2, fb_display[i >> 1], fb_display[(i >> 1) + 1]);
 		}
 		else if (state > (badge_cfg.led_brightness&3))
 			leds_releaseall();
