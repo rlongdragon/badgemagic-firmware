@@ -3,6 +3,7 @@
 #include "leddrv.h"
 #include "debug.h"
 #include "legacyctrl.h"
+#include "config.h"
 #include "ngctrl.h"
 #include "CH58x_common.h"
 #include "usb/usb.h"
@@ -66,7 +67,9 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
 		return -1;
 	}
 
-	if (!authorized) {
+	// Without ble_security nothing ever sets `authorized`, so only gate
+	// uploads when a PIN is actually required
+	if (badge_cfg.ble_security && !authorized) {
 		if (!memcmp(val, "wang", 4)) {
 			char buf[32];
 			int blen = snprintf(buf, sizeof(buf), "BLE: rejected - not authed\n");
