@@ -742,14 +742,10 @@ static void disp_bright_submenu()
 		fb_setpx(BRIGHT_SLIDER_X + BRIGHT_SLIDER_STEP * l, 6);
 	}
 
-	// Knob at the current level
+	// Knob at the current level: a line taller than the ticks
 	int p = BRIGHT_SLIDER_X + BRIGHT_SLIDER_STEP * badge_cfg.led_brightness;
 	for (int y = 2; y <= 8; y++)
 		fb_setpx(p, y);
-	for (int y = 3; y <= 7; y++) {
-		fb_setpx(p - 1, y);
-		fb_setpx(p + 1, y);
-	}
 	scr_end();
 }
 
