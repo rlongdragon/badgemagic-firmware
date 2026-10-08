@@ -23,6 +23,7 @@ void legacy_reset_auth()
 
 static uint16_t legacy_usb_rx_len;
 static uint16_t legacy_usb_data_len;
+static uint16_t legacy_usb_buf_size;
 static uint8_t *legacy_usb_data;
 static uint8_t legacy_usb_active;
 
@@ -30,6 +31,22 @@ static uint8_t legacy_usb_active;
 static uint8_t ng_usb_buf[NG_USB_MAX_LEN];
 static uint16_t ng_usb_len;
 static uint16_t ng_usb_expected;
+
+/* Set the RTC from the upload header timestamp.
+ * Year byte: Badge Magic app sends the low byte of the full year
+ * (2026 -> 0xEA), lednamebadge.py sends year % 100 (2026 -> 26).
+ * The two are told apart by value, which holds until 2048. */
+static void legacy_sync_rtc(const data_legacy_t *d)
+{
+	const uint8_t *t = d->timestamp;
+
+	if (t[1] < 1 || t[1] > 12 || t[2] < 1 || t[2] > 31
+			|| t[3] > 23 || t[4] > 59 || t[5] > 59)
+		return;
+
+	uint16_t year = 2000 + (t[0] < 100 ? t[0] : (uint8_t)(t[0] - 208));
+	RTC_InitTime(year, t[1], t[2], t[3], t[4], t[5]);
+}
 
 int legacy_ble_rx(uint8_t *val, uint16_t len)
 {
@@ -142,8 +159,7 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
 		char buf[32];
 		int blen = snprintf(buf, sizeof(buf), "BLE: transfer complete\n");
 		cdc_tx_poll((uint8_t *)buf, blen, 10);
-		data_legacy_t *d = (data_legacy_t *)data;
-		RTC_InitTime(2000 + ((d->timestamp[0] - 208 + 256) % 256), d->timestamp[1], d->timestamp[2], d->timestamp[3], d->timestamp[4], d->timestamp[5]);
+		legacy_sync_rtc((data_legacy_t *)data);
 		data_flatSave(data, data_len);
 		free(data);
 		data = NULL;
@@ -154,6 +170,32 @@ int legacy_ble_rx(uint8_t *val, uint16_t len)
 	return 0;
 }
 
+static void legacy_usb_reset()
+{
+	free(legacy_usb_data);
+	legacy_usb_data = NULL;
+	legacy_usb_buf_size = 0;
+	legacy_usb_rx_len = 0;
+	legacy_usb_data_len = 0;
+	legacy_usb_active = 0;
+}
+
+// Grow the receive buffer to hold at least `size` bytes
+static int legacy_usb_reserve(uint32_t size)
+{
+	if (size <= legacy_usb_buf_size)
+		return 0;
+	if (size > UINT16_MAX)
+		return -1;
+
+	uint8_t *p = realloc(legacy_usb_data, size);
+	if (!p)
+		return -1;
+	legacy_usb_data = p;
+	legacy_usb_buf_size = size;
+	return 0;
+}
+
 int legacy_usb_rx(uint8_t *buf, uint16_t len)
 {
 	PRINT("dump first 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
@@ -161,45 +203,39 @@ int legacy_usb_rx(uint8_t *buf, uint16_t len)
 				buf[4], buf[5], buf[6], buf[7]);
 
 	if (legacy_usb_rx_len == 0) {
-		if (memcmp(buf, "wang", 5))
+		if (len < 5 || memcmp(buf, "wang", 5))
 			return -1;
-
 		legacy_usb_active = 1;
-		legacy_usb_data_len = 0;
-
-		int init_len = len > LEGACY_HEADER_SIZE ? len : sizeof(data_legacy_t);
-		init_len += MAX_PACKET_SIZE;
-		legacy_usb_data = malloc(init_len);
-		if (!legacy_usb_data) {
-			legacy_usb_active = 0;
-			return -3;
-		}
 	}
 
+	// Hosts pad the last packet (HID: always 64 bytes), so the total
+	// received can exceed data_len; make room for the whole packet.
+	if (legacy_usb_reserve((uint32_t)legacy_usb_rx_len + len)) {
+		legacy_usb_reset();
+		return -3;
+	}
 	memcpy(legacy_usb_data + legacy_usb_rx_len, buf, len);
 	legacy_usb_rx_len += len;
 
-	if (!legacy_usb_data_len) {
+	if (!legacy_usb_data_len && legacy_usb_rx_len >= LEGACY_HEADER_SIZE) {
 		data_legacy_t *d = (data_legacy_t *)legacy_usb_data;
-		uint16_t n = bigendian16_sum(d->sizes, 8);
-		legacy_usb_data_len = LEGACY_HEADER_SIZE + LED_ROWS * n;
-		legacy_usb_data = realloc(legacy_usb_data, legacy_usb_data_len);
-		if (!legacy_usb_data) {
-			legacy_usb_rx_len = 0;
-			legacy_usb_data_len = 0;
-			legacy_usb_active = 0;
+		uint32_t n = bigendian16_sum(d->sizes, 8);
+		uint32_t data_len = LEGACY_HEADER_SIZE + LED_ROWS * n;
+		uint32_t padded = (data_len + MAX_PACKET_SIZE - 1)
+				/ MAX_PACKET_SIZE * MAX_PACKET_SIZE;
+
+		if (data_len > UINT16_MAX || legacy_usb_reserve(padded)) {
+			legacy_usb_reset();
 			return -3;
 		}
+		legacy_usb_data_len = data_len;
 	}
 
-	if ((legacy_usb_rx_len > LEGACY_HEADER_SIZE)
+	if (legacy_usb_data_len && (legacy_usb_rx_len > LEGACY_HEADER_SIZE)
 			&& legacy_usb_rx_len >= legacy_usb_data_len) {
+		legacy_sync_rtc((data_legacy_t *)legacy_usb_data);
 		data_flatSave(legacy_usb_data, legacy_usb_data_len);
-		free(legacy_usb_data);
-		legacy_usb_data = NULL;
-		legacy_usb_rx_len = 0;
-		legacy_usb_data_len = 0;
-		legacy_usb_active = 0;
+		legacy_usb_reset();
 		handle_after_rx();
 	}
 	return 0;
