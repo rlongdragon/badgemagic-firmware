@@ -35,17 +35,22 @@ static uint16_t ng_usb_expected;
 /* Set the RTC from the upload header timestamp.
  * Year byte: Badge Magic app sends the low byte of the full year
  * (2026 -> 0xEA), lednamebadge.py sends year % 100 (2026 -> 26).
- * The two are told apart by value, which holds until 2048. */
+ * The two are told apart by value, which holds until 2048.
+ * The app also sends month + 1 (13 in December). Only the time of day is
+ * shown, so an invalid date falls back to Jan 1 instead of skipping. */
 static void legacy_sync_rtc(const data_legacy_t *d)
 {
 	const uint8_t *t = d->timestamp;
 
-	if (t[1] < 1 || t[1] > 12 || t[2] < 1 || t[2] > 31
-			|| t[3] > 23 || t[4] > 59 || t[5] > 59)
+	if (t[1] == 0 && t[2] == 0) // no timestamp
+		return;
+	if (t[3] > 23 || t[4] > 59 || t[5] > 59)
 		return;
 
 	uint16_t year = 2000 + (t[0] < 100 ? t[0] : (uint8_t)(t[0] - 208));
-	RTC_InitTime(year, t[1], t[2], t[3], t[4], t[5]);
+	uint8_t month = (t[1] >= 1 && t[1] <= 12) ? t[1] : 1;
+	uint8_t day = (t[2] >= 1 && t[2] <= 31) ? t[2] : 1;
+	RTC_InitTime(year, month, day, t[3], t[4], t[5]);
 }
 
 int legacy_ble_rx(uint8_t *val, uint16_t len)
