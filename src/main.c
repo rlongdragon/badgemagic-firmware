@@ -908,8 +908,8 @@ int main()
 	debug_init();
 	PRINT("\nDebug console is on UART%d\n", DEBUG);
 
-	cdc_onWrite(legacy_usb_rx);
-	hiddev_onWrite(legacy_usb_rx);
+	cdc_onWrite(usb_rx_dispatch);
+	hiddev_onWrite(usb_rx_dispatch);
 	usb_start();
 
 	led_init();
