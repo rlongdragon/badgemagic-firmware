@@ -52,6 +52,15 @@ int cfg_writeflash(uint16_t flash_offs, badge_cfg_t *cfg)
 		return -1;
 	}
 	cfg_update_crc(&badge_cfg);
+
+	// Data-Flash can only clear bits, so erase the config's pages first;
+	// otherwise every save after the first one corrupts the config
+	uint16_t start = flash_offs & ~(EEPROM_PAGE_SIZE - 1);
+	uint16_t end = (flash_offs + CFG_SIZE + EEPROM_PAGE_SIZE - 1)
+			& ~(EEPROM_PAGE_SIZE - 1);
+	int r = EEPROM_ERASE(start, end - start);
+	if (r)
+		return r;
 	return EEPROM_WRITE(flash_offs, cfg, CFG_SIZE);
 }
 

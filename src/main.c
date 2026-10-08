@@ -43,12 +43,13 @@ enum MODES {
 };
 
 static int menu_cursor=0;
-#define MENU_ITEMS_COUNT 6
+#define MENU_ITEMS_COUNT 7
 static const char *menu_labels[] = {
 	"ANIMATION",
 	"BT-PAIRING",
 	"CLOCK MODE",
 	"GAMES",
+	"BRIGHT",
 	"SECURITY",
 	"OFF"
 };
@@ -56,8 +57,9 @@ static const char *menu_labels[] = {
 #define MENU_IDX_BLE       1
 #define MENU_IDX_CLOCK     2
 #define MENU_IDX_GAMES     3
-#define MENU_IDX_SECURITY  4
-#define MENU_IDX_OFF       5
+#define MENU_IDX_BRIGHT    4
+#define MENU_IDX_SECURITY  5
+#define MENU_IDX_OFF       6
 
 #define ANI_BASE_SPEED_T      (200000) // uS
 #define ANI_MARQUE_SPEED_T    (100000) // uS
@@ -111,6 +113,7 @@ static void disp_stopwatch();
 void return_to_menu();
 static void enter_games_submenu(void);
 static void enter_security_submenu();
+static void enter_bright_submenu();
 static void bt_pairing_bypass();
 
 __HIGH_CODE
@@ -560,6 +563,9 @@ static void menu_select(){
         case MENU_IDX_GAMES:
             enter_games_submenu();
             break;
+        case MENU_IDX_BRIGHT:
+            enter_bright_submenu();
+            break;
         case MENU_IDX_SECURITY:
             enter_security_submenu();
             break;
@@ -697,6 +703,100 @@ static void bt_pairing_bypass()
     btn_onLongPress(KEY1, return_to_menu);    // restore KEY1 long-press to normal
 #endif
     start_ble_animation();      // drop PIN display, show BT animation
+}
+
+// BRIGHT submenu: [small sun] +--+--|--+ [big sun]
+// Changes apply immediately; save keeps them, cancel restores.
+#define BRIGHT_SLIDER_X     12
+#define BRIGHT_SLIDER_STEP  6  // multiple of 3 so ticks start a dash
+
+static int bright_prev;
+
+static void fb_setpx(int col, int row)
+{
+	if (col >= 0 && col < LED_COLS && row >= 0 && row < LED_ROWS)
+		fb_write[col] |= 1 << row;
+}
+
+static void disp_bright_submenu()
+{
+	// Column bitmaps, bit 0 = top row
+	static const uint16_t sun_small[] = {0x08, 0x00, 0x1c, 0x5d, 0x1c, 0x00, 0x08};
+	static const uint16_t sun_big[] = {
+		0x010, 0x082, 0x038, 0x07c, 0x17d, 0x07c, 0x038, 0x082, 0x010
+	};
+	const int end = BRIGHT_SLIDER_X + BRIGHT_SLIDER_STEP * (BRIGHTNESS_LEVELS - 1);
+
+	scr_begin();
+	for (int i = 0; i < 7; i++)
+		fb_write[2 + i] |= sun_small[i] << 2;
+	for (int i = 0; i < 9; i++)
+		fb_write[34 + i] |= sun_big[i] << 1;
+
+	// Track: dashed line, 2 on 1 off, with a tick at every level
+	for (int x = BRIGHT_SLIDER_X; x <= end; x++)
+		if ((x - BRIGHT_SLIDER_X) % 3 != 2)
+			fb_setpx(x, 5);
+	for (int l = 0; l < BRIGHTNESS_LEVELS; l++) {
+		fb_setpx(BRIGHT_SLIDER_X + BRIGHT_SLIDER_STEP * l, 4);
+		fb_setpx(BRIGHT_SLIDER_X + BRIGHT_SLIDER_STEP * l, 6);
+	}
+
+	// Knob at the current level
+	int p = BRIGHT_SLIDER_X + BRIGHT_SLIDER_STEP * badge_cfg.led_brightness;
+	for (int y = 2; y <= 8; y++)
+		fb_setpx(p, y);
+	for (int y = 3; y <= 7; y++) {
+		fb_setpx(p - 1, y);
+		fb_setpx(p + 1, y);
+	}
+	scr_end();
+}
+
+static void bright_down()
+{
+	if (badge_cfg.led_brightness > 0) {
+		badge_cfg.led_brightness--;
+		disp_bright_submenu();
+	}
+}
+
+static void bright_up()
+{
+	if (badge_cfg.led_brightness < BRIGHTNESS_LEVELS - 1) {
+		badge_cfg.led_brightness++;
+		disp_bright_submenu();
+	}
+}
+
+static void bright_save()
+{
+	cfg_writeflash_def(&badge_cfg);
+	return_to_menu();
+}
+
+static void bright_cancel()
+{
+	badge_cfg.led_brightness = bright_prev;
+	return_to_menu();
+}
+
+static void enter_bright_submenu()
+{
+	stop_all_animation();
+	bright_prev = badge_cfg.led_brightness;
+	btn_onOnePress(KEY1, bright_down);
+	btn_onOnePress(KEY2, bright_up);
+#if HW_KEY_COUNT == 4
+	btn_onLongPress(KEY1, NULL);
+	btn_onLongPress(KEY2, NULL);
+	auxbtn_onOnePress(KEY3, bright_save);
+	auxbtn_onOnePress(KEY4, bright_cancel);
+#else
+	btn_onLongPress(KEY1, bright_save);
+	btn_onLongPress(KEY2, bright_cancel);
+#endif
+	disp_bright_submenu();
 }
 
 static void enter_security_submenu()
