@@ -1,0 +1,3 @@
+# Build output (BUILD_DIR defaults to build/)
+/build/
+/build-*/
