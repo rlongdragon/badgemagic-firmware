@@ -119,7 +119,9 @@ static const pindesc_t led_pins[LED_PINCOUNT] = {
 	PINDESC(B, 4),  // Q
 	PINDESC(B, 2),  // R
 	PINDESC(B, 1),  // S
-#ifdef HARDWARE_REV3
+// LED_PIN_T_PB6: REV2 pinout but T on PB6, as on boards that used the
+// former USBC_VERSION build
+#if defined(HARDWARE_REV3) || defined(LED_PIN_T_PB6)
 	PINDESC(B, 6), // T
 #else
 	PINDESC(B, 23), // T
