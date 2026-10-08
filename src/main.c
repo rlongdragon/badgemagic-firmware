@@ -349,6 +349,8 @@ static void stop_all_animation()
 	tmos_stop_task(common_taskid, ANI_FLASH);
 	tmos_stop_task(common_taskid, BLE_NEXT_STEP);
 	PFIC_DisableIRQ(TMR0_IRQn);
+	// Games keep a pointer to fb_display, so no swap may happen after this
+	fb_swap_pending = 0;
 	memset((void *)fb_front, 0, LED_COLS * sizeof(uint16_t));
 	memset((void *)fb_back, 0, LED_COLS * sizeof(uint16_t));
 	PFIC_EnableIRQ(TMR0_IRQn);
@@ -377,6 +379,7 @@ uint8_t stream_bitmap(uint8_t *params, uint16_t len)
 	fb_begin_update();
 	tmos_memcpy((void *)fb_write, params, min(LED_COLS * 2, len));
 	fb_end_update();
+	fb_swap();
 	return 0;
 }
 
@@ -425,7 +428,7 @@ static void fb_putchar_small(char c, int col, int row)
 {
     for (int i = 0; i < 4; i++) {
         if (col + i >= LED_COLS) break;
-        fb[col + i] = (fb[col + i] & ~(0x1f << row)) | (font3x5[c - ' '][i] << row);
+        fb_write[col + i] = (fb_write[col + i] & ~(0x1f << row)) | (font3x5[c - ' '][i] << row);
     }
 }
 
@@ -438,9 +441,22 @@ static void fb_puts_small(char *s, int len, int col, int row)
     }
 }
 
+// Full-screen redraws: draw into the back buffer, then swap at frame boundary
+static void scr_begin(void)
+{
+	fb_begin_update();
+	memset((void *)fb_write, 0, LED_COLS * sizeof(uint16_t));
+}
+
+static void scr_end(void)
+{
+	fb_end_update();
+	fb_swap();
+}
+
 static void disp_auth_code(uint16_t code)
 {
-	memset(fb, 0, sizeof(fb));
+	scr_begin();
 	char buf[5];
 	buf[0] = '0' + (code / 1000) % 10;
 	buf[1] = '0' + (code / 100)  % 10;
@@ -448,13 +464,14 @@ static void disp_auth_code(uint16_t code)
 	buf[3] = '0' + (code)        % 10;
 	buf[4] = '\0';
 	fb_puts(buf, 4, 8, 2);   // centered on 44-col display, row 2
+	scr_end();
 }
 
 static void disp_clock()
 {
     uint16_t year, month, day, hour, minute, second;
     RTC_GetTime(&year, &month, &day, &hour, &minute, &second);
-    memset(fb, 0, sizeof(fb));
+    scr_begin();
 
     char buf[6];
     buf[0] = '0' + hour / 10;
@@ -465,11 +482,12 @@ static void disp_clock()
     buf[5] = '\0';
 
     fb_puts(buf, 5, 2, 2);
+    scr_end();
 }
 
 static void disp_menu()
 {
-    memset(fb, 0, sizeof(fb));
+    scr_begin();
 
     int page = menu_cursor / 2;
     int item0 = page * 2;
@@ -488,6 +506,7 @@ static void disp_menu()
         fb_puts_small((char *)menu_labels[item1],
                       strlen(menu_labels[item1]), 4, 6);
     }
+    scr_end();
 }
 
 static void menu_up(){
@@ -568,8 +587,9 @@ static void disp_stopwatch()
     buf[6] = '0' + centis % 10;
     buf[7] = '\0';
 
-    memset(fb, 0, sizeof(fb));
-    fb_puts(buf, 7, 2, 2);  
+    scr_begin();
+    fb_puts(buf, 7, 2, 2);
+    scr_end();
 }
 
 static void sw_startstop()
@@ -601,7 +621,7 @@ static int clock_submenu_sel = 0;
 
 static void disp_clock_submenu()
 {
-    memset(fb, 0, sizeof(fb));
+    scr_begin();
     if (clock_submenu_sel == 0)
         fb_putchar_small('>', 0, 0);
     else
@@ -609,6 +629,7 @@ static void disp_clock_submenu()
 
     fb_puts_small("TIME", 4, 4, 0);
     fb_puts_small("STOPWATCH", 9, 4, 6);
+    scr_end();
 }
 
 static void clock_submenu_nav()
@@ -643,7 +664,7 @@ static int security_submenu_sel = 0;  // 0 = ENABLE, 1 = DISABLE
 
 static void disp_security_submenu()
 {
-    memset(fb, 0, sizeof(fb));
+    scr_begin();
     if (security_submenu_sel == 0)
         fb_putchar_small('>', 0, 0);
     else
@@ -651,6 +672,7 @@ static void disp_security_submenu()
 
     fb_puts_small("ENABLE", 6, 4, 0);
     fb_puts_small("DISABLE", 7, 4, 6);
+    scr_end();
 }
 
 static void security_submenu_nav()
@@ -722,7 +744,7 @@ static int games_submenu_sel = 0;
 
 static void disp_games_submenu(void)
 {
-    memset(fb, 0, sizeof(fb));
+    scr_begin();
     static const char *labels[] = { "SNAKE", "FLAPPY", "PONG" };
 
     int page  = games_submenu_sel / 2;
@@ -738,6 +760,7 @@ static void disp_games_submenu(void)
             fb_putchar_small('>', 0, 6);
         fb_puts_small((char *)labels[item1], strlen(labels[item1]), 4, 6);
     }
+    scr_end();
 }
 
 static void games_submenu_nav(void)
@@ -752,13 +775,13 @@ static void games_submenu_select(void)
     stop_all_animation();
     switch (games_submenu_sel) {
         case 0:
-            game_start((uint16_t *)fb);
+            game_start((uint16_t *)fb_display);
             break;
         case 1:
-            flappy_start((uint16_t *)fb);
+            flappy_start((uint16_t *)fb_display);
             break;
         case 2:
-            pong_start((uint16_t *)fb);
+            pong_start((uint16_t *)fb_display);
             break;
     }
 }
@@ -857,9 +880,10 @@ static void mode_setup_normal()
 
 static void disp_ble_off()
 {
-    memset(fb, 0, sizeof(fb));
+    scr_begin();
     fb_puts_small("BLUETOOTH", 9, 4, 0);
     fb_puts_small("OFF", 3, 4, 6);
+    scr_end();
 }
 
 void handle_after_rx()
